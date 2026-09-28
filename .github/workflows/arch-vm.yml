@@ -64,36 +64,53 @@ jobs:
 
       - name: "🖥️ Start Arch VM"
         run: |
-          set -eux
+          set -u
 
           cd "$HOME/archvm"
 
-          nohup qemu-system-x86_64 \
-            -machine q35,accel=kvm \
-            -enable-kvm \
-            -cpu host \
+          echo "🔎 Checking VM files..."
+          ls -lh archlinux.iso arch.qcow2
+
+          echo "🚀 Starting QEMU WITHOUT KVM..."
+
+          qemu-system-x86_64 \
+            -machine q35,accel=tcg \
+            -cpu max \
             -smp 2 \
-            -m 4096 \
+            -m 3072 \
             -device virtio-vga \
             -drive file=arch.qcow2,format=qcow2,if=virtio \
             -cdrom archlinux.iso \
             -boot d \
             -vnc 127.0.0.1:0 \
-            > qemu.log 2>&1 &
+            -daemonize \
+            -pidfile qemu.pid
 
-          echo $! > qemu.pid
+          echo "QEMU command returned: $?"
 
-          sleep 8
+          sleep 5
 
-          if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
-            echo "☠️ QEMU died!"
-            cat qemu.log
+          echo "🔎 PID file:"
+          cat qemu.pid || true
+
+          echo "🔎 Process check:"
+          ps aux | grep '[q]emu-system' || true
+
+          if [ ! -f qemu.pid ]; then
+            echo "☠️ QEMU DID NOT CREATE A PID FILE"
             exit 1
           fi
 
-          echo "🔥 QEMU IS ALIVE"
-          cat qemu.log || true
+          PID="$(cat qemu.pid)"
 
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "☠️ QEMU PROCESS DIED"
+            exit 1
+          fi
+
+          echo ""
+          echo "🔥🔥🔥 QEMU SURVIVED 🔥🔥🔥"
+          echo "PID: $PID"
       - name: "🌐 Start noVNC"
         run: |
           set -eux
