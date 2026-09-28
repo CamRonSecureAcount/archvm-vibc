@@ -1,4 +1,4 @@
-name: "🔥 Arch Desktop VM"
+name: "🔥 Arch XFCE VM"
 
 on:
   workflow_dispatch:
@@ -9,11 +9,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ============================================================
-      # HOST SETUP
-      # ============================================================
-
-      - name: "📦 Install QEMU + noVNC"
+      - name: "📦 Install host tools"
         run: |
           set -eux
 
@@ -24,21 +20,14 @@ jobs:
             novnc \
             websockify \
             curl \
-            wget
+            wget \
+            genisoimage
 
           mkdir -p "$HOME/archvm"
-          cd "$HOME/archvm"
 
-          echo "🔥 Host ready"
-
-      # ============================================================
-      # DOWNLOAD ARCH
-      # ============================================================
-
-      - name: "💿 Download Arch Linux"
+      - name: "💿 Download Arch"
         run: |
           set -eux
-
           cd "$HOME/archvm"
 
           ISO="$(
@@ -49,22 +38,194 @@ jobs:
 
           test -n "$ISO"
 
-          echo "Downloading $ISO"
-
           wget \
             "https://geo.mirror.pkgbuild.com/iso/latest/$ISO" \
             -O archlinux.iso
 
           ls -lh archlinux.iso
 
-      # ============================================================
-      # DISK
-      # ============================================================
-
-      - name: "💾 Create 32GB virtual disk"
+      - name: "🤖 Build automatic installer"
         run: |
           set -eux
+          cd "$HOME/archvm"
 
+          mkdir -p payload
+
+          cat > payload/install.sh <<'INSTALL'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+
+          echo "🔥 ARCH AUTOINSTALL STARTING"
+
+          DISK=/dev/vda
+
+          # --------------------------------------------------------
+          # Disk
+          # --------------------------------------------------------
+
+          wipefs -af "$DISK"
+
+          parted -s "$DISK" \
+            mklabel gpt \
+            mkpart ESP fat32 1MiB 513MiB \
+            set 1 esp on \
+            mkpart ROOT ext4 513MiB 100%
+
+          mkfs.fat -F32 "${DISK}1"
+          mkfs.ext4 -F "${DISK}2"
+
+          mount "${DISK}2" /mnt
+
+          mkdir -p /mnt/boot
+          mount "${DISK}1" /mnt/boot
+
+          # --------------------------------------------------------
+          # Install Arch + XFCE + LARP PACKAGES™
+          # --------------------------------------------------------
+
+          pacstrap -K /mnt \
+            base \
+            linux \
+            linux-firmware \
+            sudo \
+            networkmanager \
+            grub \
+            efibootmgr \
+            xorg-server \
+            xfce4 \
+            xfce4-goodies \
+            lightdm \
+            lightdm-gtk-greeter \
+            firefox \
+            pipewire \
+            pipewire-pulse \
+            wireplumber \
+            fastfetch \
+            btop \
+            htop \
+            neovim \
+            nano \
+            git \
+            curl \
+            wget \
+            tree \
+            unzip \
+            zip \
+            ripgrep \
+            fd \
+            bat \
+            eza \
+            tmux \
+            cowsay \
+            lolcat \
+            noto-fonts \
+            noto-fonts-emoji
+
+          genfstab -U /mnt >> /mnt/etc/fstab
+
+          # --------------------------------------------------------
+          # System configuration
+          # --------------------------------------------------------
+
+          arch-chroot /mnt ln -sf \
+            /usr/share/zoneinfo/UTC \
+            /etc/localtime
+
+          arch-chroot /mnt hwclock --systohc
+
+          echo "en_US.UTF-8 UTF-8" \
+            >> /mnt/etc/locale.gen
+
+          arch-chroot /mnt locale-gen
+
+          echo "LANG=en_US.UTF-8" \
+            > /mnt/etc/locale.conf
+
+          echo "archbox" \
+            > /mnt/etc/hostname
+
+          # --------------------------------------------------------
+          # User
+          # --------------------------------------------------------
+
+          arch-chroot /mnt useradd \
+            -m \
+            -G wheel,audio,video \
+            -s /bin/bash \
+            setin
+
+          echo "setin:setin" |
+            arch-chroot /mnt chpasswd
+
+          echo "root:arch" |
+            arch-chroot /mnt chpasswd
+
+          echo "%wheel ALL=(ALL:ALL) ALL" \
+            > /mnt/etc/sudoers.d/wheel
+
+          chmod 440 /mnt/etc/sudoers.d/wheel
+
+          # --------------------------------------------------------
+          # Services
+          # --------------------------------------------------------
+
+          arch-chroot /mnt systemctl enable NetworkManager
+          arch-chroot /mnt systemctl enable lightdm
+
+          # --------------------------------------------------------
+          # Bootloader
+          # --------------------------------------------------------
+
+          arch-chroot /mnt grub-install \
+            --target=x86_64-efi \
+            --efi-directory=/boot \
+            --bootloader-id=ARCH \
+            --removable
+
+          arch-chroot /mnt grub-mkconfig \
+            -o /boot/grub/grub.cfg
+
+          # --------------------------------------------------------
+          # Terminal greeting 😎
+          # --------------------------------------------------------
+
+          cat >> /mnt/home/setin/.bashrc <<'EOF'
+
+          echo
+          echo "🔥 Welcome to ArchBox"
+          fastfetch
+          EOF
+
+          chown 1000:1000 /mnt/home/setin/.bashrc
+
+          sync
+
+          echo ""
+          echo "======================================"
+          echo "🔥 ARCH INSTALLATION COMPLETE 🔥"
+          echo "======================================"
+          echo ""
+          echo "User: setin"
+          echo "Password: setin"
+          echo ""
+          echo "Shutting down installer..."
+
+          poweroff
+          INSTALL
+
+          chmod +x payload/install.sh
+
+          genisoimage \
+            -quiet \
+            -o payload.iso \
+            -V ARCHPAYLOAD \
+            payload/
+
+          ls -lh payload.iso
+
+      - name: "💾 Create VM disk"
+        run: |
+          set -eux
           cd "$HOME/archvm"
 
           qemu-img create \
@@ -72,16 +233,9 @@ jobs:
             arch.qcow2 \
             32G
 
-          qemu-img info arch.qcow2
-
-      # ============================================================
-      # FIRST BOOT
-      # ============================================================
-
-      - name: "🚀 Boot Arch installer"
+      - name: "🚀 Start installer VM"
         run: |
           set -eux
-
           cd "$HOME/archvm"
 
           qemu-system-x86_64 \
@@ -93,32 +247,22 @@ jobs:
             -device virtio-net-pci,netdev=n0 \
             -netdev user,id=n0 \
             -drive file=arch.qcow2,format=qcow2,if=virtio \
-            -cdrom archlinux.iso \
+            -drive file=archlinux.iso,media=cdrom \
+            -drive file=payload.iso,media=cdrom \
             -boot d \
             -vnc 127.0.0.1:0 \
             -daemonize \
             -pidfile qemu.pid
 
-          sleep 8
+          sleep 5
 
-          PID="$(cat qemu.pid)"
+          kill -0 "$(cat qemu.pid)"
 
-          if ! kill -0 "$PID" 2>/dev/null; then
-            echo "☠️ QEMU DIED"
-            exit 1
-          fi
-
-          echo "🔥 Arch installer VM running"
-          echo "PID: $PID"
-
-      # ============================================================
-      # NOVNC
-      # ============================================================
+          echo "🔥 QEMU alive"
 
       - name: "🖥️ Start noVNC"
         run: |
           set -eux
-
           cd "$HOME/archvm"
 
           nohup websockify \
@@ -131,18 +275,13 @@ jobs:
 
           sleep 3
 
-          curl -f http://127.0.0.1:6080/vnc.html >/dev/null
+          curl -f \
+            http://127.0.0.1:6080/vnc.html \
+            >/dev/null
 
-          echo "🔥 noVNC alive"
-
-      # ============================================================
-      # CLOUDFLARE
-      # ============================================================
-
-      - name: "☁️ Install Cloudflare Tunnel"
+      - name: "☁️ Start Cloudflare tunnel"
         run: |
           set -eux
-
           cd "$HOME/archvm"
 
           wget -q \
@@ -150,14 +289,6 @@ jobs:
             -O cloudflared
 
           chmod +x cloudflared
-
-          ./cloudflared --version
-
-      - name: "🌎 Open VM tunnel"
-        run: |
-          set -eux
-
-          cd "$HOME/archvm"
 
           nohup ./cloudflared tunnel \
             --url http://127.0.0.1:6080 \
@@ -169,17 +300,14 @@ jobs:
           URL=""
 
           for i in $(seq 1 30); do
-
             URL="$(
               grep -oE \
-                'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-                tunnel.log |
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              tunnel.log |
               head -n1 || true
             )"
 
-            if [ -n "$URL" ]; then
-              break
-            fi
+            [ -n "$URL" ] && break
 
             sleep 2
           done
@@ -187,50 +315,28 @@ jobs:
           test -n "$URL"
 
           echo ""
-          echo "================================================"
-          echo "🔥🔥🔥 ARCH VM READY 🔥🔥🔥"
+          echo "=============================================="
+          echo "🔥 ARCH INSTALLER READY"
           echo ""
           echo "$URL/vnc.html?autoconnect=true&resize=scale"
-          echo ""
-          echo "================================================"
-
-      # ============================================================
-      # KEEP IT ALIVE
-      # ============================================================
+          echo "=============================================="
 
       - name: "🧟 Keep VM alive"
         run: |
           cd "$HOME/archvm"
 
           echo ""
-          echo "VM IS ALIVE 😎"
+          echo "Once Arch reaches:"
           echo ""
-          echo "Inside Arch, install using:"
+          echo "root@archiso ~ #"
           echo ""
-          echo "archinstall"
+          echo "type ONLY:"
           echo ""
-          echo "Recommended:"
-          echo "Desktop: XFCE"
-          echo "Network: NetworkManager"
-          echo "Audio: PipeWire"
+          echo "mkdir -p /mnt/payload && mount /dev/sr1 /mnt/payload && bash /mnt/payload/install.sh"
+          echo ""
+          echo "Then DON'T TOUCH ANYTHING 😭"
           echo ""
 
           while true; do
-
-            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
-              echo "☠️ QEMU DIED"
-              exit 1
-            fi
-
-            if ! kill -0 "$(cat novnc.pid)" 2>/dev/null; then
-              echo "☠️ noVNC DIED"
-              exit 1
-            fi
-
-            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
-              echo "☠️ CLOUDFLARE DIED"
-              exit 1
-            fi
-
             sleep 30
           done
