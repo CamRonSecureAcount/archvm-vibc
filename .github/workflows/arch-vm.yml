@@ -1,0 +1,213 @@
+name: "🖥️ Arch Linux noVNC VM"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  arch-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: "📦 Install QEMU + noVNC"
+        run: |
+          set -eux
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            qemu-system-x86 \
+            qemu-utils \
+            novnc \
+            websockify \
+            curl \
+            wget
+
+          echo "🔥 VM tools installed"
+
+      - name: "💿 Download Arch Linux"
+        run: |
+          set -eux
+
+          mkdir -p "$HOME/archvm"
+          cd "$HOME/archvm"
+
+          ISO_URL="$(
+            curl -fsSL https://geo.mirror.pkgbuild.com/iso/latest/ |
+            grep -oE 'href="archlinux-[0-9.]+-x86_64\.iso"' |
+            head -n1 |
+            cut -d'"' -f2
+          )"
+
+          test -n "$ISO_URL"
+
+          echo "Downloading: $ISO_URL"
+
+          wget --progress=dot:giga \
+            "https://geo.mirror.pkgbuild.com/iso/latest/$ISO_URL" \
+            -O archlinux.iso
+
+          ls -lh archlinux.iso
+
+      - name: "💾 Create virtual disk"
+        run: |
+          set -eux
+
+          cd "$HOME/archvm"
+
+          qemu-img create \
+            -f qcow2 \
+            arch.qcow2 \
+            30G
+
+          qemu-img info arch.qcow2
+
+      - name: "🖥️ Start Arch VM"
+        run: |
+          set -eux
+
+          cd "$HOME/archvm"
+
+          nohup qemu-system-x86_64 \
+            -machine q35,accel=kvm \
+            -enable-kvm \
+            -cpu host \
+            -smp 2 \
+            -m 4096 \
+            -device virtio-vga \
+            -drive file=arch.qcow2,format=qcow2,if=virtio \
+            -cdrom archlinux.iso \
+            -boot d \
+            -vnc 127.0.0.1:0 \
+            > qemu.log 2>&1 &
+
+          echo $! > qemu.pid
+
+          sleep 8
+
+          if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+            echo "☠️ QEMU died!"
+            cat qemu.log
+            exit 1
+          fi
+
+          echo "🔥 QEMU IS ALIVE"
+          cat qemu.log || true
+
+      - name: "🌐 Start noVNC"
+        run: |
+          set -eux
+
+          cd "$HOME/archvm"
+
+          nohup websockify \
+            --web=/usr/share/novnc \
+            6080 \
+            127.0.0.1:5900 \
+            > novnc.log 2>&1 &
+
+          echo $! > novnc.pid
+
+          sleep 5
+
+          curl -I http://127.0.0.1:6080/vnc.html
+
+          echo "🔥 noVNC IS ALIVE"
+
+      - name: "☁️ Install Cloudflare Tunnel"
+        run: |
+          set -eux
+
+          cd "$HOME/archvm"
+
+          wget -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -O cloudflared
+
+          chmod +x cloudflared
+
+          ./cloudflared --version
+
+      - name: "🚇 Open browser tunnel"
+        run: |
+          set -eux
+
+          cd "$HOME/archvm"
+
+          nohup ./cloudflared tunnel \
+            --url http://127.0.0.1:6080 \
+            --no-autoupdate \
+            > tunnel.log 2>&1 &
+
+          echo $! > tunnel.pid
+
+          echo "Waiting for tunnel..."
+
+          URL=""
+
+          for i in $(seq 1 30); do
+            URL="$(
+              grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+                tunnel.log |
+              head -n1 || true
+            )"
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$URL" ]; then
+            echo "☠️ COULD NOT FIND TUNNEL URL"
+            cat tunnel.log
+            exit 1
+          fi
+
+          echo ""
+          echo "=============================================="
+          echo "🔥🔥🔥 ARCH VM IS READY 🔥🔥🔥"
+          echo ""
+          echo "$URL/vnc.html?autoconnect=true&resize=scale"
+          echo ""
+          echo "OPEN THAT LINK ON YOUR IPAD"
+          echo "=============================================="
+
+          echo "$URL/vnc.html?autoconnect=true&resize=scale" \
+            > vm-url.txt
+
+      - name: "🧟 Keep VM alive"
+        run: |
+          cd "$HOME/archvm"
+
+          echo "VM processes:"
+          ps aux | grep -E 'qemu|websockify|cloudflared' || true
+
+          echo ""
+          echo "☠️ Workflow will stay alive until cancelled."
+          echo "Go to Actions → this run → Cancel workflow when finished."
+          echo ""
+
+          while true; do
+
+            if ! kill -0 "$(cat qemu.pid)" 2>/dev/null; then
+              echo "☠️ QEMU DIED"
+              cat qemu.log
+              exit 1
+            fi
+
+            if ! kill -0 "$(cat novnc.pid)" 2>/dev/null; then
+              echo "☠️ noVNC DIED"
+              cat novnc.log
+              exit 1
+            fi
+
+            if ! kill -0 "$(cat tunnel.pid)" 2>/dev/null; then
+              echo "☠️ CLOUDFLARE TUNNEL DIED"
+              cat tunnel.log
+              exit 1
+            fi
+
+            sleep 30
+          done
